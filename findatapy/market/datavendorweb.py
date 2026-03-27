@@ -1456,9 +1456,11 @@ class DataVendorFlatFile(DataVendor):
                         meta_data_cache = speed_cache.get_meta_data(full_path)
 
                         if meta_data_cache is not None:
-                            meta_data_cache["modified_datetime"] = (
-                                datetime.strptime(meta_data_cache["modified_datetime"],
-                                                  "%Y-%m-%d %H:%M:%S %z"))
+                            # Parse datetime string and ensure it's in UTC
+                            parsed_dt = datetime.strptime(meta_data_cache["modified_datetime"],
+                                                          "%Y-%m-%d %H:%M:%S %z")
+                            # Convert to UTC regardless of what timezone was in the string
+                            meta_data_cache["modified_datetime"] = parsed_dt.astimezone(datetime.timezone.utc)
 
                         is_same = io_engine.is_same_file(
                             file_meta_data_1=meta_data_cache,
@@ -1471,10 +1473,16 @@ class DataVendorFlatFile(DataVendor):
                     else:
                         data_frame = io_engine.read_parquet(full_path)
 
-                        meta_data_file["modified_datetime"] = (
-                            meta_data_file["modified_datetime"]
-                            .strftime(
-                                "%Y-%m-%d %H:%M:%S %z"))  # '2026-03-20 14:30:45 +0000'
+                        # Convert to UTC before formatting to ensure consistent timezone
+                        modified_dt = meta_data_file["modified_datetime"]
+                        if modified_dt.tzinfo is not None:
+                            modified_dt_utc = modified_dt.astimezone(datetime.timezone.utc)
+                        else:
+                            # If naive, assume UTC
+                            modified_dt_utc = modified_dt.replace(tzinfo=datetime.timezone.utc)
+                        
+                        meta_data_file["modified_datetime"] = modified_dt_utc.strftime(
+                            "%Y-%m-%d %H:%M:%S %z")  # '2026-03-20 14:30:45 +0000'
 
                         speed_cache.put_dataframe(full_path, data_frame,
                                                   meta_data=meta_data_file)

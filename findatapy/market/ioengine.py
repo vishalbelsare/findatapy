@@ -1862,6 +1862,18 @@ class IOEngine(object):
             - 'filesize_bytes': size of file in bytes
             - 'path': the file path
             Returns None if file doesn't exist or error occurs
+
+        Notes
+        -----
+        This method performs a fresh stat() call each time to get current file metadata.
+        However, metadata can become stale due to:
+        - File system caching (especially on network file systems like NFS, SMB)
+        - S3 eventual consistency
+        - The file being modified immediately after this call
+        
+        For critical comparisons where freshness is important, consider calling this method
+        immediately before comparison rather than caching results. For S3, metadata updates
+        may be delayed due to eventual consistency.
         """
 
         logger = LoggerManager.getLogger(__name__)
@@ -1911,11 +1923,10 @@ class IOEngine(object):
                 stat_info = os.stat(path)
 
                 # Convert modification time to datetime in UTC
-                # fromtimestamp uses local timezone by default, so we use utcfromtimestamp
+                # Use fromtimestamp with tz=timezone.utc to directly create timezone-aware UTC datetime
+                # This works correctly regardless of the system's local timezone
                 import datetime as dt
-                modified_dt = dt.datetime.utcfromtimestamp(stat_info.st_mtime)
-                # Make it timezone-aware as UTC
-                modified_dt = modified_dt.replace(tzinfo=dt.timezone.utc)
+                modified_dt = dt.datetime.fromtimestamp(stat_info.st_mtime, tz=dt.timezone.utc)
 
                 return {
                     'modified_datetime': modified_dt,
@@ -1926,6 +1937,94 @@ class IOEngine(object):
         except Exception as e:
             logger.warning(f"Error getting file properties for {path}: {str(e)}")
             return None
+
+    def touch_file(self,
+                   path: str,
+                   cloud_credentials: dict = None) -> bool:
+        """Update the modification time of a file to current time
+
+        This forces the file's modification timestamp to be updated, which can be useful
+        to ensure metadata is not stale. Works for both local files and S3 objects.
+
+        Parameters
+        ----------
+        path : str
+            Path to the file (local or S3)
+        cloud_credentials : dict (optional)
+            Credentials for accessing S3
+
+        Returns
+        -------
+        bool
+            True if successful, False otherwise
+
+        Notes
+        -----
+        For S3, this performs a copy-to-self operation which updates the metadata.
+        For local files, this uses os.utime() or Path.touch().
+        """
+
+        logger = LoggerManager.getLogger(__name__)
+
+        cloud_credentials = self._convert_cred(cloud_credentials)
+
+        try:
+            if "s3://" in path:
+                import boto3
+
+                # Parse S3 path
+                path_clean = path.replace("s3://", "")
+                parts = path_clean.split("/", 1)
+
+                if len(parts) != 2:
+                    logger.warning(f"Invalid S3 path format: {path}")
+                    return False
+
+                bucket = parts[0]
+                key = parts[1]
+
+                # Get credentials
+                if cloud_credentials is None:
+                    cloud_credentials = self.cloud_credentials
+
+                # Create S3 client with credentials if available
+                if cloud_credentials and 's3_filesystem' in cloud_credentials:
+                    s3_creds = cloud_credentials['s3_filesystem']
+                    s3 = boto3.client(
+                        's3',
+                        aws_access_key_id=s3_creds.get('key'),
+                        aws_secret_access_key=s3_creds.get('secret')
+                    )
+                else:
+                    s3 = boto3.client('s3')
+
+                # Copy object to itself to update metadata
+                s3.copy_object(
+                    Bucket=bucket,
+                    CopySource={'Bucket': bucket, 'Key': key},
+                    Key=key,
+                    MetadataDirective='REPLACE'
+                )
+
+                logger.debug(f"Updated modification time for S3 file: {path}")
+                return True
+            else:
+                # Local file
+                from pathlib import Path
+
+                if not os.path.exists(path):
+                    logger.warning(f"Local path does not exist: {path}")
+                    return False
+
+                # Update modification time to current time
+                Path(path).touch(exist_ok=True)
+
+                logger.debug(f"Updated modification time for local file: {path}")
+                return True
+
+        except Exception as e:
+            logger.warning(f"Failed to touch file {path}: {str(e)}")
+            return False
 
     def is_same_file(self,
                      path_1: str = None,
@@ -1963,6 +2062,11 @@ class IOEngine(object):
         - They have the same filesize AND modified datetime
 
         At least one of (path_1 or file_meta_data_1) and (path_2 or file_meta_data_2) must be provided.
+
+        Important: If you pass file_meta_data directly (rather than paths), the metadata
+        represents a snapshot from when it was captured. For the freshest comparison,
+        pass paths instead of cached metadata, as this will trigger fresh stat() calls.
+        However, even fresh stat() calls can return cached data on network file systems.
         """
 
         logger = LoggerManager.getLogger(__name__)

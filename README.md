@@ -152,6 +152,8 @@ individual data providers)
 
 # Coding log
 
+* 27 Mar 2026
+  * Added UTC default for timezone in get_file_properties in IOEngine & tests
 * 20 Mar 2026
   * Improved caching of Parquet files in IOEngine (and via MarketDataRequest)
 * 11 Jan 2026

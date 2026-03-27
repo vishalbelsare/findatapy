@@ -28,8 +28,11 @@ class LoggerManager(object):
     __metaclass__ = Singleton
 
     _loggers = {}
+    _disable_other_loggers = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, disable_other_loggers: bool = True):
+        LoggerManager._disable_other_loggers = disable_other_loggers
+
         pass
 
     @staticmethod
@@ -51,8 +54,9 @@ class LoggerManager(object):
 
         # when recalling appears to make other loggers disabled
         # hence apply this hack!
-        for name in LoggerManager._loggers.keys():
-            LoggerManager._loggers[name].disabled = False
+        if LoggerManager._disable_other_loggers:
+            for name in LoggerManager._loggers.keys():
+                LoggerManager._loggers[name].disabled = False
 
         return log
 
