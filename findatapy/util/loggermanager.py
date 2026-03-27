@@ -30,10 +30,12 @@ class LoggerManager(object):
     _loggers = {}
     _disable_other_loggers = True
 
-    def __init__(self, disable_other_loggers: bool = True):
-        LoggerManager._disable_other_loggers = disable_other_loggers
-
+    def __init__(self):
         pass
+
+    @staticmethod
+    def set_disable_other_loggers(disable_other_loggers):
+        LoggerManager._disable_other_loggers = disable_other_loggers
 
     @staticmethod
     def getLogger(name=None):
