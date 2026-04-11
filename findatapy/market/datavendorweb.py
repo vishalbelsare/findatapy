@@ -1491,6 +1491,20 @@ class DataVendorFlatFile(DataVendor):
                         logger.info(f"Caching version of {full_path} for faster loading in the future")
                 else:
                     data_frame = io_engine.read_parquet(full_path)
+
+                # Trim DataFrame output to just the tickers/fields requested (if specified)
+                columns = []
+
+                for t in md_request.tickers:
+                    for f in md_request.fields:
+
+                        col = f"{t}.{f}"
+
+                        if col in data_frame.columns:
+                            columns.append(col)
+
+                if columns:
+                    data_frame = data_frame[columns]
             else:
                 columns = []
 

@@ -1294,20 +1294,22 @@ class IOEngine(object):
         """
 
         if "s3://" in path:
-            storage_options = self._convert_cred(cloud_credentials,
-                                                 convert_to_s3fs=True)
             path = self.sanitize_path(path)
 
+            # Use pyarrow's native S3FileSystem (synchronous C++)
+            # instead of fsspec/s3fs/aiohttp which has asyncio
+            # compatibility issues with Python 3.14+
+            s3_fs = self._create_cloud_filesystem(
+                cloud_credentials, "s3_pyarrow")
+            path_no_scheme = path.replace("s3://", "")
+
+            table = pq.read_table(
+                path_no_scheme, filesystem=s3_fs, columns=columns)
+
             if engine == "pandas":
-                return pd.read_parquet(path,
-                                       storage_options=storage_options,
-                                       columns=columns
-                                       )
+                return table.to_pandas()
             elif engine == "polars":
-                return pl.read_parquet(path,
-                                       storage_options=storage_options,
-                                       columns=columns
-                                       )
+                return pl.from_arrow(table)
 
         else:
             if engine == "pandas":
@@ -1327,7 +1329,8 @@ class IOEngine(object):
         # os.environ["AWS_SESSION_TOKEN"] = cloud_credentials["aws_session_token"]
 
         if "s3_pyarrow" == filesystem_type:
-            return pyarrow.fs.S3FileSystem(anon=cloud_credentials["aws_anon"],
+            anon_key = "anonymous" if int(pyarrow.__version__.split(".")[0]) >= 16 else "anon"
+            return pyarrow.fs.S3FileSystem(**{anon_key: cloud_credentials["aws_anon"]},
                                            access_key=cloud_credentials[
                                                "aws_access_key"],
                                            secret_key=cloud_credentials[
@@ -1523,15 +1526,21 @@ class IOEngine(object):
                     p = self.sanitize_path(p)
 
                     if "s3://" in p:
-                        storage_options = self._convert_cred(cloud_credentials,
-                                                             convert_to_s3fs=True)
+                        # Use pyarrow's native S3FileSystem to
+                        # avoid fsspec/aiohttp asyncio issues on
+                        # Python 3.14+
+                        s3_fs = self._create_cloud_filesystem(
+                            cloud_credentials, "s3_pyarrow")
+                        p_no_scheme = p.replace("s3://", "")
 
                         if engine == "pandas":
-                            df.to_parquet(
-                                p, compression=parquet_compression,
+                            table = pa.Table.from_pandas(df)
+                            pq.write_table(
+                                table, p_no_scheme,
+                                filesystem=s3_fs,
+                                compression=parquet_compression,
                                 coerce_timestamps=constants.default_time_units,
-                                allow_truncated_timestamps=True,
-                                storage_options=storage_options)
+                                allow_truncated_timestamps=True)
                     else:
                         if engine == "pandas":
                             df.to_parquet(
@@ -1661,16 +1670,42 @@ class IOEngine(object):
                        filename: str = None,
                        cloud_credentials: dict = None,
                        parquet_compression: str = constants.parquet_compression,
-                       use_pyarrow_directly: bool = False):
+                       use_pyarrow_directly: bool = False,
+                       use_thread: bool = False):
 
-        self.to_csv(df, path, filename=filename.replace(".parquet", ".csv"),
-                    cloud_credentials=cloud_credentials)
+        if use_thread:
+            from concurrent.futures import ThreadPoolExecutor
 
-        self.to_parquet(df, path,
-                        filename=filename.replace(".csv", ".parquet"),
-                        cloud_credentials=cloud_credentials,
-                        parquet_compression=parquet_compression,
-                        use_pyarrow_directly=use_pyarrow_directly)
+            def _write_csv():
+                self.to_csv(df, path, filename=filename.replace(".parquet", ".csv"),
+                            cloud_credentials=cloud_credentials)
+
+            def _write_parquet():
+                self.to_parquet(df, path,
+                                filename=filename.replace(".csv", ".parquet"),
+                                cloud_credentials=cloud_credentials,
+                                parquet_compression=parquet_compression,
+                                use_pyarrow_directly=use_pyarrow_directly)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as tp:
+                    f1 = tp.submit(_write_csv)
+                    f2 = tp.submit(_write_parquet)
+                    f1.result()
+                    f2.result()
+            except RuntimeError:
+                # Fallback to sequential if interpreter is shutting down
+                _write_csv()
+                _write_parquet()
+        else:
+            self.to_csv(df, path, filename=filename.replace(".parquet", ".csv"),
+                        cloud_credentials=cloud_credentials)
+
+            self.to_parquet(df, path,
+                            filename=filename.replace(".csv", ".parquet"),
+                            cloud_credentials=cloud_credentials,
+                            parquet_compression=parquet_compression,
+                            use_pyarrow_directly=use_pyarrow_directly)
 
     def _get_cloud_path(self,
                         path: str,

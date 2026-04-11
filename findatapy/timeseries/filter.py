@@ -199,7 +199,8 @@ class Filter(object):
         """
         offset = 0  # inclusive
 
-        finish_date = datetime.datetime.utcnow()
+        from utilstats.utils.compat import utcnow
+        finish_date = utcnow()
         start_date = finish_date - timedelta(days=days)
 
         return self.filter_time_series_by_date_offset(start_date, finish_date,
@@ -268,6 +269,13 @@ class Filter(object):
         -------
         DataFrame
         """
+
+        # Ensure start_date/finish_date are Timestamps, not datetime.date
+        # (pandas 2.0+ cannot compare Timestamp with datetime.date)
+        if isinstance(start_date, datetime.date) and not isinstance(start_date, datetime.datetime):
+            start_date = pd.Timestamp(start_date)
+        if isinstance(finish_date, datetime.date) and not isinstance(finish_date, datetime.datetime):
+            finish_date = pd.Timestamp(finish_date)
 
         if hasattr(data_frame.index, 'tz'):
             if data_frame.index.tz is not None:

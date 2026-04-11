@@ -152,6 +152,8 @@ individual data providers)
 
 # Coding log
 
+* 11 Apr 2026
+  * Changed s3 so it uses pyarrow instead of s3fs, so can use Python 3.14
 * 27 Mar 2026
   * Added UTC default for timezone in get_file_properties in IOEngine & tests
 * 20 Mar 2026
