@@ -1293,29 +1293,36 @@ class IOEngine(object):
         DataFrame
         """
 
-        if "s3://" in path:
-            path = self.sanitize_path(path)
+        try:
+            if "s3://" in path:
+                path = self.sanitize_path(path)
 
-            # Use pyarrow's native S3FileSystem (synchronous C++)
-            # instead of fsspec/s3fs/aiohttp which has asyncio
-            # compatibility issues with Python 3.14+
-            s3_fs = self._create_cloud_filesystem(
-                cloud_credentials, "s3_pyarrow")
-            path_no_scheme = path.replace("s3://", "")
+                # Use pyarrow's native S3FileSystem (synchronous C++)
+                # instead of fsspec/s3fs/aiohttp which has asyncio
+                # compatibility issues with Python 3.14+
+                s3_fs = self._create_cloud_filesystem(
+                    cloud_credentials, "s3_pyarrow")
+                path_no_scheme = path.replace("s3://", "")
 
-            table = pq.read_table(
-                path_no_scheme, filesystem=s3_fs, columns=columns)
+                table = pq.read_table(
+                    path_no_scheme, filesystem=s3_fs, columns=columns)
 
-            if engine == "pandas":
-                return table.to_pandas()
-            elif engine == "polars":
-                return pl.from_arrow(table)
+                if engine == "pandas":
+                    return table.to_pandas()
+                elif engine == "polars":
+                    return pl.from_arrow(table)
 
-        else:
-            if engine == "pandas":
-                return pd.read_parquet(path, columns=columns)
-            elif engine == "polars":
-                return pl.read_parquet(path, columns=columns)
+            else:
+                if engine == "pandas":
+                    return pd.read_parquet(path, columns=columns)
+                elif engine == "polars":
+                    return pl.read_parquet(path, columns=columns)
+        except Exception as e:
+            logger = LoggerManager().getLogger(__name__)
+
+            logger.error(f"Failed to read {path}:" + str(e))
+
+            raise e
 
     def _create_cloud_filesystem(self,
                                  cloud_credentials: dict,
@@ -1329,20 +1336,43 @@ class IOEngine(object):
         # os.environ["AWS_SESSION_TOKEN"] = cloud_credentials["aws_session_token"]
 
         if "s3_pyarrow" == filesystem_type:
-            anon_key = "anonymous" if int(pyarrow.__version__.split(".")[0]) >= 16 else "anon"
-            return pyarrow.fs.S3FileSystem(**{anon_key: cloud_credentials["aws_anon"]},
-                                           access_key=cloud_credentials[
-                                               "aws_access_key"],
-                                           secret_key=cloud_credentials[
-                                               "aws_secret_key"],
-                                           session_token=cloud_credentials[
-                                               "aws_session_token"])
+            # pyarrow.fs.S3FileSystem renamed the kwarg from `anon` to
+            # `anonymous`.  Its __init__ is Cython (*args, **kwargs) so
+            # we can't inspect; just try the new name and fall back to
+            # the old one on TypeError.
+            _common_kwargs = dict(
+                access_key=cloud_credentials["aws_access_key"],
+                secret_key=cloud_credentials["aws_secret_key"],
+                session_token=cloud_credentials["aws_session_token"],
+            )
+            if "aws_region" in cloud_credentials:
+                _common_kwargs["region"] = cloud_credentials["aws_region"]
+
+            try:
+                s3_fs = pyarrow.fs.S3FileSystem(
+                    anonymous=cloud_credentials["aws_anon"],
+                    **_common_kwargs)
+            except TypeError:
+                s3_fs = pyarrow.fs.S3FileSystem(
+                    anon=cloud_credentials["aws_anon"],
+                    **_common_kwargs)
 
         elif "s3_filesystem" == filesystem_type:
-            return S3FileSystem(anon=cloud_credentials["aws_anon"],
-                                key=cloud_credentials["aws_access_key"],
-                                secret=cloud_credentials["aws_secret_key"],
-                                token=cloud_credentials["aws_session_token"])
+            if "aws_region" in cloud_credentials:
+                s3_fs = S3FileSystem(anon=cloud_credentials["aws_anon"],
+                                     key=cloud_credentials["aws_access_key"],
+                                     secret=cloud_credentials[
+                                         "aws_secret_key"],
+                                     token=cloud_credentials[
+                                         "aws_session_token"],
+                                     client_kwargs={'region_name': cloud_credentials["aws_region"]})
+            else:
+                s3_fs =  S3FileSystem(anon=cloud_credentials["aws_anon"],
+                                    key=cloud_credentials["aws_access_key"],
+                                    secret=cloud_credentials["aws_secret_key"],
+                                    token=cloud_credentials["aws_session_token"])
+
+        return s3_fs
 
     def _convert_cred(self,
                       cloud_credentials: dict,
@@ -1360,7 +1390,8 @@ class IOEngine(object):
         mappings = {"aws_anon": "anon",
                     "aws_access_key": "key",
                     "aws_secret_key": "secret",
-                    "aws_session_token": "token"
+                    "aws_session_token": "token",
+                    "aws_region": "region"
                     }
 
         for m in mappings.keys():
